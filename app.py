@@ -11,20 +11,44 @@ import streamlit as st
 # Simple live dashboard for campaigns assigned to:
 # Gautham Marthandan / Gautham / GM
 #
-# Boards:
-# - Action Network
-# - Vegas Insider
-# - Roto Grinders
-# - Canada Sports Betting
+# IMPORTANT LOGIC
+# - Vegas Insider + Action Network are group-based boards.
+#   The 2026 sync sheet stores Monday group IDs for each week.
+# - Roto Grinders + Canada Sports Betting are item-based boards.
+#   The 2026 sync sheet stores comma-separated Monday item IDs for each week.
 # =====================================================
 
 MONDAY_API_URL = "https://api.monday.com/v2"
+
+# Published Google Sheet base from the existing weekly roundup setup.
+# This must be the published `/pub` URL, not the edit URL.
+SHEET_PUB_BASE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSLOHk9kqK5iw_7hx8z6zaarsMgo514PmgEV15UwQud2yhFL9PfAnzobTKqjt8LFISgxCG77UXL8vOT/pub"
+
+# 2026 sync table tab: Board_Groups_2026
+GID_BY_YEAR = {
+    2026: 549871281,
+}
 
 BOARD_NAMES = {
     "Action Network": "6727665427",
     "Vegas Insider": "6727663754",
     "Roto Grinders": "7077539299",
     "Canada Sports Betting": "7101616385",
+}
+
+# Column names as they appear in the 2026 sync table.
+SYNC_SHEET_BRAND_COLUMNS = {
+    "Action Network": "Action Network",
+    "Vegas Insider": "VegasInsider",
+    "Roto Grinders": "RotoGrinders",
+    "Canada Sports Betting": "CSB",
+}
+
+BRAND_MODE = {
+    "Action Network": "group",
+    "Vegas Insider": "group",
+    "Roto Grinders": "items",
+    "Canada Sports Betting": "items",
 }
 
 BRAND_STYLES = {
@@ -44,7 +68,7 @@ PREFERRED_COLUMN_IDS = {
     "person": ["person", "people", "person__1", "people__1"],
     "status": ["status", "status__1", "color", "color__1"],
     "category": ["dropdown4__1", "dropdown", "category", "category__1"],
-    "date": ["date", "date__1", "timeline", "timeline__1"],
+    "date": ["date", "date__1", "timeline", "timeline__1", "date4"],
     "link": ["link", "link__1", "url", "url__1"],
 }
 
@@ -277,13 +301,20 @@ label, [data-testid="stWidgetLabel"] p {
 )
 
 # -----------------------------
-# Monday helpers
+# Monday + Sheet helpers
 # -----------------------------
 def get_secret_token() -> str:
     try:
         return st.secrets["monday"]["monday_api_token"]
     except Exception:
         return ""
+
+
+def csv_url_for_year(year: int) -> str:
+    gid = GID_BY_YEAR.get(year)
+    if gid is None:
+        raise ValueError(f"Missing Google Sheet gid for {year}.")
+    return f"{SHEET_PUB_BASE}?gid={gid}&single=true&output=csv"
 
 
 def monday_request(query: str, variables: Optional[dict] = None) -> dict:
@@ -310,6 +341,20 @@ def monday_request(query: str, variables: Optional[dict] = None) -> dict:
 
 def normalise_text(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def clean_sheet_cell(value) -> str:
+    text = normalise_text(value)
+    if not text or text.upper() in {"NA", "N/A", "NONE", "NAN"}:
+        return ""
+    return text
+
+
+def parse_item_ids(value) -> List[str]:
+    text = clean_sheet_cell(value)
+    if not text:
+        return []
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def column_map(item: dict) -> Dict[str, str]:
@@ -378,8 +423,7 @@ def current_monday(today: Optional[datetime] = None) -> datetime:
     return datetime(today.year, today.month, today.day) - timedelta(days=today.weekday())
 
 
-def bucket_from_group(group_title: str) -> str:
-    week_start = parse_week_start(group_title)
+def bucket_from_week_start(week_start: Optional[datetime]) -> str:
     if not week_start:
         return "Unscheduled"
 
@@ -395,16 +439,35 @@ def bucket_from_group(group_title: str) -> str:
     return "Future"
 
 
-def format_week_range(group_title: str) -> str:
-    week_start = parse_week_start(group_title)
+def format_week_range_from_start(week_start: Optional[datetime], fallback: str = "") -> str:
     if not week_start:
-        return group_title or "No week group"
+        return fallback or "No week group"
     week_end = week_start + timedelta(days=6)
     return f"{week_start.strftime('%d %b %Y')} – {week_end.strftime('%d %b %Y')}"
 
 
-@st.cache_data(ttl=300, show_spinner="Loading Monday campaigns…")
-def fetch_board_items(board_id: str) -> List[dict]:
+@st.cache_data(ttl=300, show_spinner="Loading 2026 sync table…")
+def load_sync_table(year: int = 2026) -> pd.DataFrame:
+    df = pd.read_csv(csv_url_for_year(year))
+    df.columns = [normalise_text(c) for c in df.columns]
+
+    if "Week" not in df.columns:
+        st.error("The 2026 sync table needs a `Week` column.")
+        st.stop()
+
+    df["Week"] = df["Week"].apply(clean_sheet_cell)
+    df = df[df["Week"].str.match(r"^Week c\.\d{2}\.\d{2}\.\d{2}$", na=False)].copy()
+    df["Week Start"] = df["Week"].apply(parse_week_start)
+    df["Bucket"] = df["Week Start"].apply(bucket_from_week_start)
+    df["Week Range"] = df.apply(lambda r: format_week_range_from_start(r["Week Start"], r["Week"]), axis=1)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner="Loading campaigns from Monday…")
+def fetch_items_by_group(board_id: str, group_id: str) -> List[dict]:
+    if not group_id:
+        return []
+
     all_items: List[dict] = []
 
     query_first = """
@@ -456,47 +519,102 @@ def fetch_board_items(board_id: str) -> List[dict]:
         all_items.extend(page.get("items", []))
         cursor = page.get("cursor")
 
+    return [item for item in all_items if str(item.get("group", {}).get("id", "")) == str(group_id)]
+
+
+@st.cache_data(ttl=300, show_spinner="Loading item-based campaigns from Monday…")
+def fetch_items_by_ids(item_ids: List[str]) -> List[dict]:
+    if not item_ids:
+        return []
+
+    cleaned_ids = [str(i).strip() for i in item_ids if str(i).strip()]
+    if not cleaned_ids:
+        return []
+
+    all_items: List[dict] = []
+
+    # Monday GraphQL can be sensitive with very long ID arrays, so chunk safely.
+    chunk_size = 80
+    for start in range(0, len(cleaned_ids), chunk_size):
+        chunk = cleaned_ids[start:start + chunk_size]
+        ids_str = ", ".join(chunk)
+        query = f"""
+        query {{
+          items(ids: [{ids_str}]) {{
+            id
+            name
+            group {{ id title }}
+            column_values {{ id text }}
+            updated_at
+          }}
+        }}
+        """
+        data = monday_request(query)
+        all_items.extend(data.get("data", {}).get("items", []) or [])
+
     return all_items
 
 
 @st.cache_data(ttl=300, show_spinner="Filtering campaigns assigned to GM…")
-def load_gm_campaigns() -> pd.DataFrame:
+def load_gm_campaigns(year: int = 2026) -> pd.DataFrame:
+    sync_df = load_sync_table(year)
     rows = []
 
-    for board_name, board_id in BOARD_NAMES.items():
-        items = fetch_board_items(board_id)
-        for item in items:
-            cols = column_map(item)
-            if not assignee_matches(cols):
+    for _, week_row in sync_df.iterrows():
+        week_label = week_row["Week"]
+        week_start = week_row["Week Start"]
+        week_range = week_row["Week Range"]
+        bucket = week_row["Bucket"]
+
+        for board_name, board_id in BOARD_NAMES.items():
+            sheet_col = SYNC_SHEET_BRAND_COLUMNS[board_name]
+            if sheet_col not in sync_df.columns:
                 continue
 
-            group_title = item.get("group", {}).get("title", "") or ""
-            status = extract_status(cols)
-            category = extract_category(cols)
-            date_value = extract_date(cols)
-            link_value = extract_link(cols)
-            week_start = parse_week_start(group_title)
+            mode = BRAND_MODE[board_name]
+            sheet_value = week_row.get(sheet_col, "")
 
-            rows.append(
-                {
-                    "Campaign": normalise_text(item.get("name", "")),
-                    "Brand": board_name,
-                    "Group": group_title,
-                    "Week Range": format_week_range(group_title),
-                    "Week Start": week_start,
-                    "Bucket": bucket_from_group(group_title),
-                    "Status": status,
-                    "Status Badge": STATUS_BADGES.get(status, status or "No status"),
-                    "Category": category,
-                    "Date / Timeline": date_value,
-                    "Link": link_value,
-                    "Updated At": item.get("updated_at", ""),
-                }
-            )
+            if mode == "group":
+                group_id = clean_sheet_cell(sheet_value)
+                items = fetch_items_by_group(board_id, group_id) if group_id else []
+            else:
+                item_ids = parse_item_ids(sheet_value)
+                items = fetch_items_by_ids(item_ids) if item_ids else []
+
+            for item in items:
+                cols = column_map(item)
+                if not assignee_matches(cols):
+                    continue
+
+                status = extract_status(cols)
+                category = extract_category(cols)
+                date_value = extract_date(cols)
+                link_value = extract_link(cols)
+
+                rows.append(
+                    {
+                        "Campaign": normalise_text(item.get("name", "")),
+                        "Brand": board_name,
+                        "Group": week_label,
+                        "Week Range": week_range,
+                        "Week Start": week_start,
+                        "Bucket": bucket,
+                        "Status": status,
+                        "Status Badge": STATUS_BADGES.get(status, status or "No status"),
+                        "Category": category,
+                        "Date / Timeline": date_value,
+                        "Link": link_value,
+                        "Updated At": item.get("updated_at", ""),
+                        "Monday Item ID": item.get("id", ""),
+                    }
+                )
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+
+    # De-dupe in case the same item appears in more than one synced week row.
+    df = df.drop_duplicates(subset=["Brand", "Monday Item ID", "Group"], keep="first")
 
     bucket_order = {"Current Week": 1, "Upcoming Week": 2, "Future": 3, "Past": 4, "Unscheduled": 5}
     df["Bucket Sort"] = df["Bucket"].map(bucket_order).fillna(99)
@@ -580,7 +698,7 @@ st.markdown(
     """
 <div class="gm-hero">
   <h1 class="gm-title">🧩 GM Campaign Dashboard</h1>
-  <p class="gm-subtitle">A simple live view of campaigns assigned to Gautham Marthandan across Action Network, Vegas Insider, Roto Grinders and Canada Sports Betting.</p>
+  <p class="gm-subtitle">A simple live view of campaigns assigned to Gautham Marthandan across Action Network, Vegas Insider, Roto Grinders and Canada Sports Betting. The dashboard uses the 2026 sync table, with group-based logic for Action Network/Vegas Insider and item-based logic for Roto Grinders/Canada Sports Betting.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -592,14 +710,11 @@ with refresh_col:
         st.cache_data.clear()
         st.rerun()
 
-campaigns = load_gm_campaigns()
+campaigns = load_gm_campaigns(2026)
 
 if campaigns.empty:
-    st.warning("No campaigns assigned to Gautham Marthandan / GM were found. Check the Monday person column text or update ASSIGNEE_MATCHES.")
+    st.warning("No campaigns assigned to Gautham Marthandan / GM were found from the 2026 sync table. Check the sync sheet, item IDs, group IDs, and Monday person column text.")
     st.stop()
-
-# Default view is deliberately simple: current week + next week.
-default_df = campaigns[campaigns["Bucket"].isin(["Current Week", "Upcoming Week"])].copy()
 
 current_df = campaigns[campaigns["Bucket"] == "Current Week"].copy()
 upcoming_df = campaigns[campaigns["Bucket"] == "Upcoming Week"].copy()
