@@ -1,6 +1,6 @@
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -8,16 +8,14 @@ import streamlit as st
 
 # =====================================================
 # GM CAMPAIGN DASHBOARD
-# Pulls campaigns assigned to Gautham Marthandan across:
+# Simple live dashboard for campaigns assigned to:
+# Gautham Marthandan / Gautham / GM
+#
+# Boards:
 # - Action Network
 # - Vegas Insider
 # - Roto Grinders
 # - Canada Sports Betting
-#
-# Recommended deployment:
-# - Keep this file in GitHub
-# - Deploy via Streamlit Community Cloud / Render / internal server
-# - Do NOT expose your monday.com API token in GitHub Pages JavaScript
 # =====================================================
 
 MONDAY_API_URL = "https://api.monday.com/v2"
@@ -30,10 +28,10 @@ BOARD_NAMES = {
 }
 
 BRAND_STYLES = {
-    "Action Network": {"emoji": "🟢", "accent": "#00A862"},
-    "Vegas Insider": {"emoji": "🟡", "accent": "#F2C23A"},
-    "Roto Grinders": {"emoji": "🔵", "accent": "#2B6CB0"},
-    "Canada Sports Betting": {"emoji": "🔴", "accent": "#EF0D23"},
+    "Action Network": {"emoji": "🟢", "accent": "#00A862", "soft": "#DCFCE7"},
+    "Vegas Insider": {"emoji": "🟡", "accent": "#F2C23A", "soft": "#FEF3C7"},
+    "Roto Grinders": {"emoji": "🔵", "accent": "#2563EB", "soft": "#DBEAFE"},
+    "Canada Sports Betting": {"emoji": "🔴", "accent": "#EF0D23", "soft": "#FEE2E2"},
 }
 
 ASSIGNEE_MATCHES = [
@@ -42,8 +40,6 @@ ASSIGNEE_MATCHES = [
     "GM",
 ]
 
-# Optional: add exact Monday column IDs if you know them.
-# The app also works without these by scanning all column text values.
 PREFERRED_COLUMN_IDS = {
     "person": ["person", "people", "person__1", "people__1"],
     "status": ["status", "status__1", "color", "color__1"],
@@ -53,12 +49,13 @@ PREFERRED_COLUMN_IDS = {
 }
 
 STATUS_ORDER = {
-    "Working on it": 1,
-    "Commissioned": 2,
+    "Commissioned": 1,
+    "Working on it": 2,
     "In progress": 3,
     "Outreach in progress": 4,
     "Live on site": 5,
     "Done": 6,
+    "Killed": 7,
 }
 
 STATUS_BADGES = {
@@ -68,8 +65,8 @@ STATUS_BADGES = {
     "Commissioned": "📝 Commissioned",
     "Live on site": "📍 Live on site",
     "In progress": "➡️ In progress",
+    "Killed": "⛔ Killed",
 }
-
 
 # -----------------------------
 # Page setup
@@ -83,82 +80,204 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-[data-testid="stSidebar"] { background: #0f172a; }
-.block-container { padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1380px; }
+:root {
+    --page-bg: #0B0F17;
+    --panel-bg: #111827;
+    --panel-border: rgba(148, 163, 184, 0.18);
+    --text-main: #F8FAFC;
+    --text-soft: #CBD5E1;
+    --muted: #94A3B8;
+    --card-bg: #FFFFFF;
+    --card-text: #111827;
+    --green: #10B981;
+}
+
+.stApp { background: var(--page-bg); }
+.block-container {
+    padding-top: 1.2rem;
+    padding-bottom: 2rem;
+    max-width: 1280px;
+}
+
+[data-testid="stSidebar"] { display: none !important; }
+[data-testid="collapsedControl"] { display: none !important; }
+
+h1, h2, h3, p, label, span, div { font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+
 .gm-hero {
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    border-radius: 18px;
-    padding: 22px 24px;
-    background: linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,41,59,0.94));
-    box-shadow: 0 12px 35px rgba(15,23,42,0.18);
+    border: 1px solid var(--panel-border);
+    border-radius: 22px;
+    padding: 24px 28px;
+    background: linear-gradient(135deg, #111827 0%, #172033 55%, #0F172A 100%);
+    box-shadow: 0 18px 45px rgba(0,0,0,0.24);
     margin-bottom: 18px;
 }
 .gm-title {
-    color: #f8fafc;
-    font-size: 34px;
-    font-weight: 850;
-    margin: 0 0 5px 0;
-    letter-spacing: -0.03em;
+    color: var(--text-main);
+    font-size: 36px;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    margin: 0 0 8px 0;
 }
 .gm-subtitle {
-    color: #cbd5e1;
-    font-size: 15px;
+    color: var(--text-soft);
+    font-size: 16px;
+    line-height: 1.65;
+    max-width: 980px;
     margin: 0;
 }
+
+.section-title {
+    color: var(--text-main);
+    font-size: 28px;
+    font-weight: 850;
+    letter-spacing: -0.03em;
+    margin: 18px 0 14px;
+}
+.section-kicker {
+    color: var(--muted);
+    font-size: 14px;
+    margin-top: -6px;
+    margin-bottom: 16px;
+}
+
+.metric-wrap {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin: 8px 0 22px;
+}
 .metric-card {
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    border-radius: 16px;
-    padding: 16px;
-    background: #ffffff;
-    box-shadow: 0 8px 24px rgba(15,23,42,0.07);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 20px;
+    padding: 18px 20px;
+    background: #FFFFFF;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.16);
 }
-.metric-label { color:#64748b; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
-.metric-value { color:#0f172a; font-size:30px; font-weight:850; line-height:1.1; margin-top:4px; }
+.metric-label {
+    color:#64748b;
+    font-size:12px;
+    font-weight:850;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+}
+.metric-value {
+    color:#0f172a;
+    font-size:34px;
+    font-weight:900;
+    line-height:1;
+    margin-top:9px;
+}
+
 .campaign-card {
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-left: 5px solid var(--accent);
-    border-radius: 16px;
-    padding: 15px 16px;
-    background: #ffffff;
-    box-shadow: 0 7px 20px rgba(15,23,42,0.06);
-    margin-bottom: 12px;
-}
-.campaign-topline {
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:14px;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-left: 6px solid var(--accent);
+    border-radius: 20px;
+    padding: 22px 24px;
+    background: #FFFFFF;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.18);
+    margin-bottom: 16px;
 }
 .campaign-name {
-    color:#0f172a;
-    font-size:16px;
-    font-weight:800;
-    line-height:1.35;
+    color:#111827;
+    font-size:22px;
+    font-weight:900;
+    line-height:1.3;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
 }
 .brand-pill, .week-pill, .status-pill, .category-pill {
     display:inline-flex;
     align-items:center;
     border-radius:999px;
-    padding:5px 9px;
-    font-size:12px;
-    font-weight:750;
-    margin: 7px 6px 0 0;
+    padding:8px 13px;
+    font-size:14px;
+    font-weight:800;
+    margin: 0 8px 8px 0;
     white-space:nowrap;
 }
-.brand-pill { background: color-mix(in srgb, var(--accent) 15%, white); color:#0f172a; border:1px solid color-mix(in srgb, var(--accent) 35%, white); }
-.week-pill { background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; }
-.status-pill { background:#ecfdf5; color:#065f46; border:1px solid #bbf7d0; }
-.category-pill { background:#f8fafc; color:#475569; border:1px solid #e2e8f0; }
-.small-muted { color:#64748b; font-size:12px; margin-top:8px; }
-hr { margin: 1rem 0; }
+.brand-pill {
+    background: var(--brand-soft);
+    color:#0f172a;
+    border:1px solid color-mix(in srgb, var(--accent) 35%, white);
+}
+.week-pill {
+    background:#F1F5F9;
+    color:#334155;
+    border:1px solid #E2E8F0;
+}
+.status-pill {
+    background:#ECFDF5;
+    color:#065F46;
+    border:1px solid #A7F3D0;
+}
+.category-pill {
+    background:#F8FAFC;
+    color:#475569;
+    border:1px solid #E2E8F0;
+}
+.small-muted {
+    color:#64748b;
+    font-size:13px;
+    margin-top:5px;
+}
+
+.empty-card {
+    border: 1px dashed rgba(148, 163, 184, 0.4);
+    border-radius: 18px;
+    background: rgba(15, 23, 42, 0.65);
+    padding: 26px;
+    color: #CBD5E1;
+    margin-bottom: 16px;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    gap: 14px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+}
+.stTabs [data-baseweb="tab"] {
+    color: #E5E7EB;
+    font-size: 18px;
+    font-weight: 850;
+    padding-left: 4px;
+    padding-right: 4px;
+}
+.stTabs [aria-selected="true"] {
+    color: #F43F5E !important;
+}
+
+div[data-baseweb="select"] > div,
+input {
+    border-radius: 13px !important;
+    background: #252632 !important;
+    border-color: rgba(148, 163, 184, 0.22) !important;
+    color: #F8FAFC !important;
+}
+
+label, [data-testid="stWidgetLabel"] p {
+    color: #F8FAFC !important;
+    font-weight: 750 !important;
+}
+
+.stDataFrame { border-radius: 16px; overflow: hidden; }
+
+@media (max-width: 900px) {
+    .metric-wrap { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .gm-title { font-size: 30px; }
+    .campaign-name { font-size: 19px; }
+}
+@media (max-width: 620px) {
+    .metric-wrap { grid-template-columns: 1fr; }
+    .campaign-card { padding: 18px; }
+    .brand-pill, .week-pill, .status-pill, .category-pill { font-size: 12px; }
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-
 # -----------------------------
-# Helpers
+# Monday helpers
 # -----------------------------
 def get_secret_token() -> str:
     try:
@@ -170,7 +289,7 @@ def get_secret_token() -> str:
 def monday_request(query: str, variables: Optional[dict] = None) -> dict:
     api_key = get_secret_token()
     if not api_key:
-        st.error("Missing monday.com API token. Add it to `.streamlit/secrets.toml` as monday.monday_api_token.")
+        st.error("Missing monday.com API token. Add it to Streamlit secrets as monday.monday_api_token.")
         st.stop()
 
     headers = {"Authorization": api_key, "Content-Type": "application/json"}
@@ -218,7 +337,6 @@ def extract_status(cols: Dict[str, str]) -> str:
     if status:
         return status
 
-    # Fallback: detect familiar status labels from any column text.
     all_text = " | ".join(cols.values())
     for status_name in STATUS_BADGES:
         if status_name.lower() in all_text.lower():
@@ -227,10 +345,7 @@ def extract_status(cols: Dict[str, str]) -> str:
 
 
 def extract_category(cols: Dict[str, str]) -> str:
-    category = first_matching_col(cols, PREFERRED_COLUMN_IDS["category"])
-    if category:
-        return category
-    return ""
+    return first_matching_col(cols, PREFERRED_COLUMN_IDS["category"])
 
 
 def extract_date(cols: Dict[str, str]) -> str:
@@ -242,7 +357,6 @@ def extract_link(cols: Dict[str, str]) -> str:
 
 
 def parse_week_start(group_title: str) -> Optional[datetime]:
-    """Parses group names like `Week c.11.05.26` or `Week 11.05.26`."""
     title = normalise_text(group_title)
     match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", title)
     if not match:
@@ -264,7 +378,7 @@ def current_monday(today: Optional[datetime] = None) -> datetime:
     return datetime(today.year, today.month, today.day) - timedelta(days=today.weekday())
 
 
-def week_bucket(group_title: str) -> str:
+def bucket_from_group(group_title: str) -> str:
     week_start = parse_week_start(group_title)
     if not week_start:
         return "Unscheduled"
@@ -272,12 +386,12 @@ def week_bucket(group_title: str) -> str:
     this_week = current_monday()
     next_week = this_week + timedelta(days=7)
 
-    if week_start < this_week:
-        return "Past"
     if this_week <= week_start < next_week:
         return "Current Week"
     if next_week <= week_start < next_week + timedelta(days=7):
         return "Upcoming Week"
+    if week_start < this_week:
+        return "Past"
     return "Future"
 
 
@@ -292,7 +406,6 @@ def format_week_range(group_title: str) -> str:
 @st.cache_data(ttl=300, show_spinner="Loading Monday campaigns…")
 def fetch_board_items(board_id: str) -> List[dict]:
     all_items: List[dict] = []
-    cursor = None
 
     query_first = """
     query ($board_id: [ID!]) {
@@ -368,12 +481,10 @@ def load_gm_campaigns() -> pd.DataFrame:
                 {
                     "Campaign": normalise_text(item.get("name", "")),
                     "Brand": board_name,
-                    "Board ID": board_id,
-                    "Item ID": item.get("id", ""),
                     "Group": group_title,
                     "Week Range": format_week_range(group_title),
                     "Week Start": week_start,
-                    "Bucket": week_bucket(group_title),
+                    "Bucket": bucket_from_group(group_title),
                     "Status": status,
                     "Status Badge": STATUS_BADGES.get(status, status or "No status"),
                     "Category": category,
@@ -387,22 +498,37 @@ def load_gm_campaigns() -> pd.DataFrame:
     if df.empty:
         return df
 
-    bucket_order = {"Past": 1, "Current Week": 2, "Upcoming Week": 3, "Future": 4, "Unscheduled": 5}
+    bucket_order = {"Current Week": 1, "Upcoming Week": 2, "Future": 3, "Past": 4, "Unscheduled": 5}
     df["Bucket Sort"] = df["Bucket"].map(bucket_order).fillna(99)
     df["Status Sort"] = df["Status"].map(STATUS_ORDER).fillna(99)
     df = df.sort_values(["Bucket Sort", "Week Start", "Brand", "Status Sort", "Campaign"], na_position="last")
     return df
 
 
+def apply_brand_filter(df: pd.DataFrame, brand_choice: str) -> pd.DataFrame:
+    if brand_choice == "All Brands":
+        return df
+    return df[df["Brand"] == brand_choice]
+
+
+def apply_search(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
+    if not search_text.strip():
+        return df
+    q = search_text.strip().lower()
+    combined = df[["Campaign", "Brand", "Group", "Status", "Category", "Date / Timeline"]].fillna("").agg(" | ".join, axis=1).str.lower()
+    return df[combined.str.contains(re.escape(q), na=False)]
+
+
 def campaign_card(row: pd.Series):
-    style = BRAND_STYLES.get(row["Brand"], {"emoji": "⚪", "accent": "#64748b"})
+    style = BRAND_STYLES.get(row["Brand"], {"emoji": "⚪", "accent": "#64748B", "soft": "#F1F5F9"})
     accent = style["accent"]
+    soft = style["soft"]
     emoji = style["emoji"]
 
     campaign_name = row["Campaign"]
     link = row.get("Link", "")
-    if link and link.startswith("http"):
-        campaign_html = f'<a href="{link}" target="_blank" style="color:#0f172a;text-decoration:none;">{campaign_name}</a>'
+    if isinstance(link, str) and link.startswith("http"):
+        campaign_html = f'<a href="{link}" target="_blank" style="color:#111827;text-decoration:none;">{campaign_name}</a>'
     else:
         campaign_html = campaign_name
 
@@ -411,10 +537,8 @@ def campaign_card(row: pd.Series):
 
     st.markdown(
         f"""
-<div class="campaign-card" style="--accent:{accent};">
-  <div class="campaign-topline">
-    <div class="campaign-name">{campaign_html}</div>
-  </div>
+<div class="campaign-card" style="--accent:{accent}; --brand-soft:{soft};">
+  <div class="campaign-name">{campaign_html}</div>
   <div>
     <span class="brand-pill">{emoji} {row['Brand']}</span>
     <span class="week-pill">{row['Bucket']} · {row['Week Range']}</span>
@@ -428,15 +552,26 @@ def campaign_card(row: pd.Series):
     )
 
 
-def show_campaigns(df: pd.DataFrame, title: str):
-    st.subheader(title)
+def show_campaign_list(df: pd.DataFrame, empty_message: str):
     if df.empty:
-        st.info("No campaigns found for this view.")
+        st.markdown(f'<div class="empty-card">{empty_message}</div>', unsafe_allow_html=True)
         return
-
     for _, row in df.iterrows():
         campaign_card(row)
 
+
+def metrics_html(current_count: int, upcoming_count: int, total_count: int, active_brands: int):
+    st.markdown(
+        f"""
+<div class="metric-wrap">
+  <div class="metric-card"><div class="metric-label">Current Week</div><div class="metric-value">{current_count}</div></div>
+  <div class="metric-card"><div class="metric-label">Upcoming Week</div><div class="metric-value">{upcoming_count}</div></div>
+  <div class="metric-card"><div class="metric-label">Total GM Campaigns</div><div class="metric-value">{total_count}</div></div>
+  <div class="metric-card"><div class="metric-label">Brands Active</div><div class="metric-value">{active_brands}</div></div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 # -----------------------------
 # App layout
@@ -445,114 +580,99 @@ st.markdown(
     """
 <div class="gm-hero">
   <h1 class="gm-title">🧩 GM Campaign Dashboard</h1>
-  <p class="gm-subtitle">A live view of campaigns assigned to Gautham Marthandan across Action Network, Vegas Insider, Roto Grinders and Canada Sports Betting.</p>
+  <p class="gm-subtitle">A simple live view of campaigns assigned to Gautham Marthandan across Action Network, Vegas Insider, Roto Grinders and Canada Sports Betting.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.header("⚙️ Controls")
-    if st.button("🔄 Refresh Monday data", use_container_width=True):
+refresh_col, spacer_col = st.columns([1, 5])
+with refresh_col:
+    if st.button("🔄 Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    st.caption("Data is cached for 5 minutes to avoid hammering the Monday API.")
+campaigns = load_gm_campaigns()
 
-
-df = load_gm_campaigns()
-
-if df.empty:
+if campaigns.empty:
     st.warning("No campaigns assigned to Gautham Marthandan / GM were found. Check the Monday person column text or update ASSIGNEE_MATCHES.")
     st.stop()
 
-# -----------------------------
-# Filters
-# -----------------------------
-filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.2, 1.2, 1.2, 1.8])
+# Default view is deliberately simple: current week + next week.
+default_df = campaigns[campaigns["Bucket"].isin(["Current Week", "Upcoming Week"])].copy()
 
-with filter_col1:
-    brand_filter = st.multiselect(
-        "Brand",
-        options=list(BOARD_NAMES.keys()),
-        default=list(BOARD_NAMES.keys()),
-    )
+current_df = campaigns[campaigns["Bucket"] == "Current Week"].copy()
+upcoming_df = campaigns[campaigns["Bucket"] == "Upcoming Week"].copy()
 
-with filter_col2:
-    bucket_filter = st.multiselect(
-        "Time view",
-        options=["Past", "Current Week", "Upcoming Week", "Future", "Unscheduled"],
-        default=["Past", "Current Week", "Upcoming Week", "Future", "Unscheduled"],
-    )
-
-with filter_col3:
-    status_options = sorted([s for s in df["Status"].dropna().unique().tolist() if s])
-    status_filter = st.multiselect("Status", options=status_options, default=status_options)
-
-with filter_col4:
-    search_text = st.text_input("Search campaigns", placeholder="Search by campaign, group, category or status")
-
-filtered = df.copy()
-filtered = filtered[filtered["Brand"].isin(brand_filter)]
-filtered = filtered[filtered["Bucket"].isin(bucket_filter)]
-if status_filter:
-    filtered = filtered[filtered["Status"].isin(status_filter) | filtered["Status"].eq("")]
-
-if search_text.strip():
-    q = search_text.strip().lower()
-    combined = filtered[["Campaign", "Brand", "Group", "Status", "Category", "Date / Timeline"]].fillna("").agg(" | ".join, axis=1).str.lower()
-    filtered = filtered[combined.str.contains(re.escape(q), na=False)]
-
-# -----------------------------
-# Metrics
-# -----------------------------
-metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-
-with metric_col1:
-    st.markdown(f'<div class="metric-card"><div class="metric-label">Total GM Campaigns</div><div class="metric-value">{len(filtered)}</div></div>', unsafe_allow_html=True)
-with metric_col2:
-    st.markdown(f'<div class="metric-card"><div class="metric-label">Current Week</div><div class="metric-value">{len(filtered[filtered["Bucket"] == "Current Week"])}</div></div>', unsafe_allow_html=True)
-with metric_col3:
-    st.markdown(f'<div class="metric-card"><div class="metric-label">Upcoming Week</div><div class="metric-value">{len(filtered[filtered["Bucket"] == "Upcoming Week"])}</div></div>', unsafe_allow_html=True)
-with metric_col4:
-    st.markdown(f'<div class="metric-card"><div class="metric-label">Brands Active</div><div class="metric-value">{filtered["Brand"].nunique()}</div></div>', unsafe_allow_html=True)
-
-st.markdown("---")
-
-# -----------------------------
-# Views
-# -----------------------------
-tab_overview, tab_current, tab_upcoming, tab_past, tab_table = st.tabs(
-    ["📌 Overview", "🟢 Current Week", "🔜 Upcoming Week", "📚 Past", "📊 Table"]
+metrics_html(
+    current_count=len(current_df),
+    upcoming_count=len(upcoming_df),
+    total_count=len(campaigns),
+    active_brands=campaigns["Brand"].nunique(),
 )
 
-with tab_overview:
-    for bucket in ["Current Week", "Upcoming Week", "Future", "Past", "Unscheduled"]:
-        bucket_df = filtered[filtered["Bucket"] == bucket]
-        if not bucket_df.empty:
-            show_campaigns(bucket_df, f"{bucket} ({len(bucket_df)})")
+main_tab, all_tab = st.tabs(["📌 This Week + Next Week", "📚 All Campaigns"])
 
-with tab_current:
-    show_campaigns(filtered[filtered["Bucket"] == "Current Week"], "Current Week")
+with main_tab:
+    st.markdown('<div class="section-title">This Week</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">Campaigns currently assigned to you for this week.</div>', unsafe_allow_html=True)
+    show_campaign_list(current_df, "No campaigns assigned to you for the current week.")
 
-with tab_upcoming:
-    show_campaigns(filtered[filtered["Bucket"] == "Upcoming Week"], "Upcoming Week")
+    st.markdown('<div class="section-title">Coming Up Next Week</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">Campaigns already lined up for next week.</div>', unsafe_allow_html=True)
+    show_campaign_list(upcoming_df, "No campaigns assigned to you for next week yet.")
 
-with tab_past:
-    show_campaigns(filtered[filtered["Bucket"] == "Past"], "Past Campaigns")
+with all_tab:
+    st.markdown('<div class="section-title">All Campaigns</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">Use this section when you want to search older campaigns or filter by brand.</div>', unsafe_allow_html=True)
 
-with tab_table:
-    st.dataframe(
-        filtered[["Campaign", "Brand", "Bucket", "Week Range", "Group", "Status", "Category", "Date / Timeline", "Updated At"]],
-        use_container_width=True,
-        hide_index=True,
+    filter_col1, filter_col2, filter_col3 = st.columns([1.15, 1.15, 2.2])
+
+    with filter_col1:
+        brand_choice = st.selectbox(
+            "Brand",
+            ["All Brands"] + list(BOARD_NAMES.keys()),
+            index=0,
+        )
+
+    with filter_col2:
+        time_choice = st.selectbox(
+            "Campaign view",
+            ["All Campaigns", "Past", "Current Week", "Upcoming Week", "Future", "Unscheduled"],
+            index=0,
+        )
+
+    with filter_col3:
+        search_text = st.text_input(
+            "Search campaigns",
+            placeholder="Search by campaign, group, category or status",
+        )
+
+    all_filtered = campaigns.copy()
+    all_filtered = apply_brand_filter(all_filtered, brand_choice)
+    if time_choice != "All Campaigns":
+        all_filtered = all_filtered[all_filtered["Bucket"] == time_choice]
+    all_filtered = apply_search(all_filtered, search_text)
+
+    st.markdown(
+        f'<div class="section-kicker">Showing {len(all_filtered)} campaign(s).</div>',
+        unsafe_allow_html=True,
     )
 
-    csv = filtered.drop(columns=["Bucket Sort", "Status Sort"], errors="ignore").to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download filtered campaigns as CSV",
-        data=csv,
-        file_name="gm_monday_campaigns.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    show_campaign_list(all_filtered, "No campaigns matched your filters.")
+
+    with st.expander("Open table view / download CSV", expanded=False):
+        st.dataframe(
+            all_filtered[["Campaign", "Brand", "Bucket", "Week Range", "Group", "Status", "Category", "Date / Timeline", "Updated At"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv = all_filtered.drop(columns=["Bucket Sort", "Status Sort"], errors="ignore").to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download filtered campaigns as CSV",
+            data=csv,
+            file_name="gm_monday_campaigns.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
